@@ -1,35 +1,22 @@
-#include <stdio.h>
 #include <stdlib.h>
-#include <ncurses>
+#include <stdio.h> 
 
+#define CMD_BUFFER_SIZE 1024 
 
-/*
-<head>
-<h1>    gras couleur surlignage  Millieu
-<h2>    gras couleur soulignage  Gauche 
-<h3>    gras couleur Tabulation Gauche
-<h4><h5><h6>    gras couleur Tabulation tabulation gauche double
-
-
-<nav>   //
-<p>     texte normal avce gestion gras 
-<br>    saut de ligne avec \n
-<a>     soulignage gras bleu 
-<img>   chafa img width & heigh -> options chafa
-<button>    if not submit ier au lien 
-<li><ul><ol>       - puis espace
-<footer> gras en couleur
-<div>    texte normal plus gras si strong
-<hr> avec **************************
-<em> <i> italique 
-<u> soulignement
-style =color pour les couleurs 
-style =align pour la pos
-width height pour les images
-*/
-
-
-int main () 
-{
-    
+int convert_mp4(char *filename) {
+    char command_gif[CMD_BUFFER_SIZE];
+    int status_gif;
+    snprintf(command_gif, CMD_BUFFER_SIZE, 
+        "ffmpeg -i \"%s.mp4\" -vf 'fps=30,scale=1280:720:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse' -loop 0 \"%s.gif\"", 
+        filename, filename);
+    status_gif = system(command_gif);
+    return status_gif == 0 ? 0 : 1; 
+}
+int main(int argc, char *argv[]) {
+    if (argc < 2) {
+        return 1;
+    }
+    char *filename_base = argv[1];
+    int status = convert_mp4(filename_base);
+    return status;
 }
