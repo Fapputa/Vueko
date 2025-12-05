@@ -10,7 +10,7 @@ import io
 URL = sys.argv[1]
 
 # Liste des types de ressources à bloquer, y compris 'script'
-BLOCKED_RESOURCES = ['image', 'media', 'font', 'stylesheet', 'script']
+BLOCKED_RESOURCES = ['image', 'media', 'font', 'stylesheet','script']
 
 # Liste d'URL de publicités/trackers connus à bloquer spécifiquement
 BLOCKED_URLS = ['doubleclick.net', 'google-analytics.com', 'quantserve.com', 'wikia-services.com/api/ad-info'] 
@@ -49,7 +49,7 @@ with sync_playwright() as p:
         # Pause fixe réduite à 5 secondes car sans JS le chargement est très rapide
         page.wait_for_timeout(5000)
         
-        with open("temp.html","w") as f:
+        with open("datas/cache/temp.html","w") as f:
             f.write(page.content())
             
     except Exception as e:
@@ -58,9 +58,9 @@ with sync_playwright() as p:
     links = page.locator("a").all()
     images = page.locator("img").all()
 
-    if os.path.exists("img"):
-        shutil.rmtree("img")
-    os.mkdir("img")
+    if os.path.exists("datas/images"):
+        shutil.rmtree("datas/images")
+    os.mkdir("datas/images")
 
     nimg = 0
 
@@ -110,13 +110,13 @@ with sync_playwright() as p:
             else:
                  ext = ".bin" 
 
-        filename = f"img/img{nimg}{ext}"
+        filename = f"datas/images/img{nimg}{ext}"
         with open(filename, "wb") as f:
             f.write(data)
 
         nimg += 1
 
-    with open("templink.csv","w") as f:
+    with open("datas/cache/templink.csv","w") as f:
         pass 
 
     for a in links:
@@ -126,7 +126,7 @@ with sync_playwright() as p:
 
         link = urljoin(URL, href)
 
-        with open("templink.csv","a") as f:
+        with open("datas/cache/templink.csv","a") as f:
             f.write(link + "\n")
 
     browser.close()
