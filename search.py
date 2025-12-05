@@ -7,8 +7,9 @@ import filetype
 from urllib.parse import urljoin
 import io
 
-RESEARCH = sys.argv[1]
-URL = "https://www.bing.com/search?pc=MOZI&form=MOZLBR&q=" + RESEARCH
+research = sys.argv[1:]
+research = "+".join(research)
+URL = "https://www.bing.com/search?pc=MOZI&form=MOZLBR&q=" + research
 
 with sync_playwright() as p:
     timeout_ms = 30000 
