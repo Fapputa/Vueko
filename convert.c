@@ -25,7 +25,7 @@ int convert_mp4(char *filename)
             "ffmpeg",
             "-i", input_mp4,
             "-vf",
-	    "fps=30,scale=1280:720:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse",
+	    "fps=24,scale=480:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse",
             "-loop", "0",
             output_gif,
             NULL
