@@ -103,7 +103,7 @@ int main() {
 
             // Lancement de search.py et attendre la fin d'exécution
             char cmd[512];
-            snprintf(cmd, sizeof(cmd), "python3 search.py \"%s\"", query);
+            snprintf(cmd, sizeof(cmd), "python3 search.py \'%s\'", query);
             system(cmd);
 
             // Charger résultats depuis datas/cache/search_results.json
