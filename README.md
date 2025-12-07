@@ -20,7 +20,7 @@ python3 -m playwright install
 ### 2. System packets
 Arch systems
 ```sh
-pacman -S chafa ffmpeg
+pacman -S chafa ffmpeg json-c ncurses
 ```
 
 ## Architecture
