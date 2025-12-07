@@ -26,7 +26,6 @@ with sync_playwright() as p:
         page.goto(URL, wait_until="domcontentloaded", timeout=timeout_ms)
         page.wait_for_timeout(3000)  # Temps pour que JS charge éventuellement
     except PlaywrightTimeoutError:
-        print("Impossible d'accéder à la page.")
         browser.close()
         sys.exit(1)
 
@@ -69,5 +68,3 @@ with sync_playwright() as p:
         json.dump(data, f, ensure_ascii=False, indent=4)
 
     browser.close()
-
-print(f"Résultats sauvegardés dans {output_file}")

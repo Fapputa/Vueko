@@ -62,7 +62,7 @@ with sync_playwright() as p:
         page.goto(URL, wait_until=None, timeout=timeout_ms)
         page.wait_for_timeout(5000)
         
-        with open("temp.html","w") as f:
+        with open("datas/cache/temp.html","w") as f:
             f.write(page.content())
             
     except Exception as e:
@@ -155,9 +155,9 @@ with sync_playwright() as p:
 
 # --- saving links
 
-with open("templink.csv","w") as f:
+with open("datas/cache/templink.csv","w") as f:
     pass 
 
 for link in link_urls:
-    with open("templink.csv","a") as f:
+    with open("datas/cache/templink.csv","a") as f:
         f.write(link + "\n")
