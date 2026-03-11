@@ -13,9 +13,18 @@ else:
     try: term_width = min(max(os.get_terminal_size().columns - 2, 40), 200)
     except: pass
 
+# Marge de sécurité : scrollbar (1) + marge droite (2) + marge préfixe (2)
+# Evite le wrapping brutal contre le bord droit de ncurses
+SAFE_MARGIN = 5
+term_width = max(term_width - SAFE_MARGIN, 40)
+
 HTML_FILE   = "datas/cache/temp.html"
 OUTPUT_FILE = "datas/cache/page.json"
 IMAGE_DIR   = "datas/images"
+
+# Nombre de lignes vides ajoutées en bas pour éviter que le contenu
+# soit coupé par la status bar (padding de sécurité)
+BOTTOM_PADDING = 30
 
 IGNORE_TAGS = {"script","style","noscript","meta","link","head","button",
                "input","select","option","textarea","iframe","svg","canvas",
@@ -37,12 +46,11 @@ def heading_prefix(name):
 def collect_inline_text(node):
     if isinstance(node, NavigableString):
         t = str(node)
-        # Ignorer le HTML brut non parsé
         if t.strip().startswith('<'): return ""
         return t
     if not isinstance(node, Tag): return ""
     if node.name in IGNORE_TAGS: return ""
-    if node.name == "img": return ""  # ne jamais inclure le src/alt d'une img comme texte
+    if node.name == "img": return ""
     return "".join(collect_inline_text(c) for c in node.children)
 
 class Renderer:
@@ -58,7 +66,6 @@ class Renderer:
         self.img_i         = 0
         self._inline_buf   = []
         self._pending_links = []
-        # Mapping src_url → fichier local (généré par GET.py)
         self.imgmap = {}
         imgmap_path = "datas/cache/imgmap.json"
         if os.path.exists(imgmap_path):
@@ -68,23 +75,19 @@ class Renderer:
             except: pass
 
     def _find_image(self, src):
-        """Trouve le fichier image téléchargé correspondant au src HTML."""
         if not self.imgs:
             return None
-        # 1. Chercher dans imgmap par URL exacte
         if src and src in self.imgmap:
             fname = self.imgmap[src]
             path  = os.path.join(IMAGE_DIR, fname)
             if os.path.exists(path):
                 return path
-        # 2. Chercher dans imgmap par URL avec/sans scheme
         if src:
             for key, fname in self.imgmap.items():
                 if key.endswith(src) or src.endswith(key.split("//", 1)[-1]):
                     path = os.path.join(IMAGE_DIR, fname)
                     if os.path.exists(path):
                         return path
-        # 3. Fallback : ordre d'apparition (ancien comportement)
         if self.img_i < len(self.imgs):
             path = os.path.join(IMAGE_DIR, self.imgs[self.img_i])
             self.img_i += 1
@@ -109,14 +112,14 @@ class Renderer:
     def wrap(self, prefix, text):
         text = " ".join(text.split())
         if not text: return
-        for i, l in enumerate(textwrap.wrap(text, max(self.w - len(prefix), 10))):
+        avail = max(self.w - len(prefix), 10)
+        for i, l in enumerate(textwrap.wrap(text, avail)):
             self.lines.append((prefix if i == 0 else " " * len(prefix)) + l)
 
     def process(self, node, in_block=False):
         if isinstance(node, NavigableString):
             t = str(node)
             ts = t.strip()
-            # Ignorer les NavigableString qui contiennent du HTML brut non parsé
             if ts and not ts.startswith('<') and not ts.startswith('&lt;'):
                 self._inline_buf.append(t)
             return
@@ -140,7 +143,6 @@ class Renderer:
         if n == "a":
             href = (node.get("href") or "").strip()
             text = " ".join(collect_inline_text(node).split())
-            # Si le <a> contient des images, les traiter d'abord
             has_img = node.find("img") is not None
             if has_img:
                 for c in node.children:
@@ -159,15 +161,12 @@ class Renderer:
             alt  = node.get("alt", "").strip()
             src  = node.get("src", "") or node.get("data-src", "") or ""
             if not src or src.startswith("data:"): return
-            # Ignorer icônes/boutons (width ou height < 50px)
             try:
                 if int(node.get("width",999)) < 50 or int(node.get("height",999)) < 50: return
             except: pass
             path = self._find_image(src)
             if path:
                 label = alt or os.path.basename(path)
-                # Récupérer les dimensions originales si disponibles
-                # Dimensions : attributs HTML d'abord, sinon lire le fichier image
                 try:    ow = int(node.get("width",  0))
                 except: ow = 0
                 try:    oh = int(node.get("height", 0))
@@ -175,7 +174,6 @@ class Renderer:
                 if (ow == 0 or oh == 0) and path:
                     try:
                         with open(path, "rb") as _f: _hdr = _f.read(32)
-                        # JPEG : chercher SOF marker
                         if _hdr[:2] == b'\xff\xd8':
                             import struct as _s
                             with open(path,"rb") as _f2:
@@ -189,11 +187,9 @@ class Renderer:
                                         oh,ow = _s.unpack(">HH",_d[1:5])
                                         break
                                     _f2.read(_ln-2)
-                        # PNG : dims à offset 16
                         elif _hdr[:8] == b'\x89PNG\r\n\x1a\n':
                             import struct as _s
                             ow,oh = _s.unpack(">II", _hdr[16:24])
-                        # WEBP : dans le chunk VP8
                         elif _hdr[:4] == b'RIFF' and _hdr[8:12] == b'WEBP':
                             import struct as _s
                             if _hdr[12:16] == b'VP8 ':
@@ -203,7 +199,6 @@ class Renderer:
                     except: pass
                 self.blank()
                 li = len(self.lines)
-                # Format : ##IM path|label|orig_w|orig_h
                 self.lines.append(f"##IM {path}|{label[:60]}|{ow}|{oh}")
                 self.links.append({
                     "text": f"[IMG] {label[:50]}",
@@ -211,7 +206,6 @@ class Renderer:
                     "line": li
                 })
                 self.blank()
-            # Image absente : ne rien afficher
             return
 
         if n in ("video", "source"):
@@ -253,7 +247,6 @@ class Renderer:
         if n == "table":
             self._flush()
             self.blank()
-            # Traiter chaque cellule avec process() pour capturer images et texte
             for row in node.find_all("tr"):
                 for cell in row.find_all(["td", "th"]):
                     for c in cell.children:
@@ -296,7 +289,6 @@ def main():
         html = f.read()
 
     soup = BeautifulSoup(html, "html.parser")
-    # Supprimer scripts, styles, commentaires HTML (NewPP, GTM, etc.)
     from bs4 import Comment
     for tag in soup(["script", "style", "noscript"]):
         tag.decompose()
@@ -310,7 +302,6 @@ def main():
         r.lines += ["##HR", ""]
 
     body = soup.find("main") or soup.find("article") or soup.find("body") or soup
-    # Si le conteneur choisi ne contient aucune img, utiliser body
     if body.name != "body" and not body.find("img"):
         body = soup.find("body") or soup
     r.process(body)
@@ -322,6 +313,11 @@ def main():
         if b and prev_blank: continue
         out.append(l)
         prev_blank = b
+
+    # Padding bas de page : évite que les dernières lignes soient cachées
+    # derrière la status bar ou coupées par le calcul de scroll
+    for _ in range(BOTTOM_PADDING):
+        out.append("")
 
     data = {"lines": out, "links": r.links}
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:

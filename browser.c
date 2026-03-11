@@ -28,6 +28,7 @@
 #include <ctype.h>
 #include <fcntl.h>
 #include <locale.h>
+#include <time.h>
 
 /* ─── Couleurs ───────────────────────────────────────────────────── */
 #define CP_TOPBAR       1
@@ -49,6 +50,10 @@
 #define MAX_LINKS       1024
 #define MAX_LEN         2048
 #define PAGE_JUMP       10
+
+/* Lignes supplémentaires autorisées après la fin du contenu
+ * pour s'assurer que la dernière ligne est toujours visible */
+#define SCROLL_BOTTOM_MARGIN 3
 
 /* ─── Modes ──────────────────────────────────────────────────────── */
 typedef enum { MODE_SEARCH, MODE_PAGE } AppMode;
@@ -86,9 +91,9 @@ static int          page_scroll      = 0;
 static int          link_positions[MAX_LINKS];
 
 static int          links_panel_open   = 0;
-static int          page_scroll_prev   = -1;  /* pour détecter changement scroll */
+static int          page_scroll_prev   = -1;
 static pid_t        images_render_pid  = -1;
-static int          img_render_width   = 0;   /* largeur utilisée pour rendre les images */
+static int          img_render_width   = 0;
 
 /* ─── Chargement résultats de recherche ──────────────────────────── */
 static void load_search_results(const char *path) {
@@ -130,9 +135,9 @@ static void load_search_results(const char *path) {
 
 /* ─── Chargement page rendue ─────────────────────────────────────── */
 #define IMG_CACHE_LINES 256
-static char  *img_cache[IMG_CACHE_LINES];  /* lignes ANSI allouées */
+static char  *img_cache[IMG_CACHE_LINES];
 static int    img_cache_count   = 0;
-static int    img_cache_scroll  = -1;      /* scroll pour lequel le cache est valide */
+static int    img_cache_scroll  = -1;
 static int    img_old_ys[256];
 static int    img_old_ys_count = 0;
 static int    img_real_line[256];
@@ -140,7 +145,6 @@ static int    img_real_h[256];
 static int    img_real_count = 0;
 
 static void img_cache_clear(void) {
-    /* Sauvegarder les anciennes positions Y avant de vider */
     img_old_ys_count = 0;
     for (int i = 0; i < img_cache_count; i++) {
         char *e = img_cache[i];
@@ -279,24 +283,20 @@ static void popup_input(const char *label, char *buf, int bufsz) {
     wbkgd(pop, COLOR_PAIR(CP_NORMAL));
     box(pop, 0, 0);
 
-    /* Barre titre rouge */
     wattron(pop, COLOR_PAIR(CP_TOPBAR) | A_BOLD);
     for (int c = 1; c < pw - 1; c++) mvwaddch(pop, 0, c, ' ');
     int lx = (pw - (int)strlen(label) - 2) / 2;
     mvwprintw(pop, 0, lx, " %s ", label);
     wattroff(pop, COLOR_PAIR(CP_TOPBAR) | A_BOLD);
 
-    /* Hint */
     wattron(pop, COLOR_PAIR(CP_URL) | A_DIM);
     mvwprintw(pop, 2, 3, "Recherche ou URL");
     wattroff(pop, COLOR_PAIR(CP_URL) | A_DIM);
 
-    /* Champ de saisie */
     wattron(pop, A_BOLD);
     mvwprintw(pop, 4, 2, " ❯ ");
     wattroff(pop, A_BOLD);
 
-    /* Ligne de saisie soulignée */
     wattron(pop, A_UNDERLINE);
     for (int c = 5; c < pw - 2; c++) mvwaddch(pop, 4, c, ' ');
     wattroff(pop, A_UNDERLINE);
@@ -315,11 +315,9 @@ static void popup_input(const char *label, char *buf, int bufsz) {
 }
 
 /* ─── Calcul hauteur image depuis métadonnées ────────────────────── */
-/* Format ligne : ##IM path|label|orig_w|orig_h                        */
 static void parse_im_line(const char *line,
                            char *imgpath, int pathsz,
                            int *orig_w, int *orig_h) {
-    /* Extraire path (champ 0), orig_w (champ 2), orig_h (champ 3) */
     strncpy(imgpath, line + 5, pathsz - 1);
     imgpath[pathsz - 1] = '\0';
     *orig_w = 0; *orig_h = 0;
@@ -331,7 +329,6 @@ static void parse_im_line(const char *line,
             *p = '\0';
             field++;
             if (field == 1) {
-                /* label — on s'en fiche */
             } else if (field == 2) {
                 *orig_w = atoi(p + 1);
             } else if (field == 3) {
@@ -344,22 +341,54 @@ static void parse_im_line(const char *line,
 }
 
 static int calc_img_h(int orig_w, int orig_h, int term_w, int term_h) {
-    /* Chaque cellule terminal ≈ 2× plus haute que large (ratio 1:2) */
     if (orig_w > 0 && orig_h > 0) {
         int h = (int)((double)orig_h / (double)orig_w * (double)term_w * 0.5);
         if (h < 3)        h = 3;
-        if (h > term_h / 2) h = term_h / 2;  /* max : moitié écran */
+        if (h > term_h / 2) h = term_h / 2;
         return h;
     }
-    /* Pas de métadonnées : 1/4 écran par défaut (moins invasif) */
     int h = term_h / 4;
     if (h < 4) h = 4;
     return h;
 }
 
-/* ─── Overlay images chafa avec cache ───────────────────────────────── */
+/* ─── Troncature d'une ligne ANSI à N colonnes visibles ─────────────
+ * Parcourt la chaîne en sautant les séquences ESC[...] et compte
+ * les caractères imprimables. Retourne un buffer alloué (à free()).  */
+static char *ansi_truncate(const char *src, int max_cols) {
+    int srclen = (int)strlen(src);
+    char *out  = malloc(srclen + 16);
+    if (!out) return NULL;
+    int ocols = 0, oi = 0, i = 0;
+    while (i < srclen && ocols < max_cols) {
+        unsigned char c = (unsigned char)src[i];
+        if (c == '\033' && i + 1 < srclen && src[i+1] == '[') {
+            /* Séquence ESC[ : copier sans compter */
+            out[oi++] = src[i++]; /* ESC */
+            out[oi++] = src[i++]; /* [   */
+            while (i < srclen) {
+                unsigned char cc = (unsigned char)src[i];
+                out[oi++] = src[i++];
+                if (cc >= 64 && cc <= 126) break; /* lettre finale */
+            }
+        } else if (c < 0x80) {
+            out[oi++] = src[i++]; ocols++;
+        } else {
+            /* UTF-8 multi-octets : 1 colonne */
+            int nb = 1;
+            if      ((c & 0xE0) == 0xC0) nb = 2;
+            else if ((c & 0xF0) == 0xE0) nb = 3;
+            else if ((c & 0xF8) == 0xF0) nb = 4;
+            for (int b = 0; b < nb && i < srclen; b++) out[oi++] = src[i++];
+            ocols++;
+        }
+    }
+    memcpy(out + oi, "\033[0m", 4); oi += 4;
+    out[oi] = '\0';
+    return out;
+}
 
-/* Cache : stocke les lignes ANSI rendues par chafa pour la position scroll courante */
+/* ─── Overlay images chafa avec cache ───────────────────────────────── */
 
 static void draw_images_overlay(WINDOW *win) {
     int height, width;
@@ -368,14 +397,14 @@ static void draw_images_overlay(WINDOW *win) {
     getbegyx(win, by, bx);
     (void)bx;
 
-    int img_w = width - 3;  /* -3 : 1 marge gauche + 1 marge droite + 1 colonne scrollbar */
+    /* Largeur image : laisser scrollbar (1) + marge droite (1) */
+    int img_w = width - 2;
+    if (img_w < 4) img_w = 4;
 
-    /* Reconstruire le cache si le scroll a changé */
     if (img_cache_scroll != page_scroll) {
         img_cache_clear();
         img_cache_scroll = page_scroll;
 
-        /* si = screen row, li = logical index — must stay in sync with draw_page */
         int si = 0;
         for (int li = page_scroll; li < page_lines_count && si < height
                                    && img_cache_count < IMG_CACHE_LINES; li++) {
@@ -385,27 +414,19 @@ static void draw_images_overlay(WINDOW *win) {
             char imgpath[MAX_LEN];
             int orig_w, orig_h;
             parse_im_line(line, imgpath, MAX_LEN, &orig_w, &orig_h);
-
-            /* Construire le chemin absolu */
-            char abs_imgpath[MAX_LEN * 2];
-            if (imgpath[0] == '/')
-                snprintf(abs_imgpath, sizeof(abs_imgpath), "%s", imgpath);
-            else
-                snprintf(abs_imgpath, sizeof(abs_imgpath), "%s/%s", base_dir, imgpath);
-
             int img_h = calc_img_h(orig_w, orig_h, img_w, height);
             for (int _ri = 0; _ri < img_real_count; _ri++)
                 if (img_real_line[_ri] == li) { img_h = img_real_h[_ri]; break; }
             if (img_h < 1) img_h = 1;
 
-            if (access(abs_imgpath, F_OK) != 0) { si += img_h; continue; }
+            if (access(imgpath, F_OK) != 0) { si += img_h; continue; }
 
             int term_y = by + si + 1;
 
             char cmd[MAX_LEN * 2];
             snprintf(cmd, sizeof(cmd),
                      "chafa --size=%dx%d --colors=256 --animate=off '%s' 2>/dev/null",
-                     img_w, img_h, abs_imgpath);
+                     img_w, img_h, imgpath);
 
             FILE *p = popen(cmd, "r");
             if (!p) { si += img_h; continue; }
@@ -434,21 +455,21 @@ static void draw_images_overlay(WINDOW *win) {
         }
     }
 
-    /* Écrire le cache sur le terminal.
-     * [%dX efface N colonnes depuis la position courante sans toucher la suite —
-     * la scrollbar en colonne (width) est ainsi préservée. */
-    int prev_y = -1;
+    /* Écriture avec clipping strict :
+     * 1. Tronquer la ligne ANSI à img_w colonnes visibles
+     * 2. Positionner + écrire
+     * 3. \033[%d;%dH\033[K  efface depuis img_w+1 jusqu'à fin de ligne
+     *    → le fond de la page (rouge/brun) et la scrollbar ne saignent plus */
     for (int i = 0; i < img_cache_count; i++) {
-        char *e = img_cache[i];
+        char *e   = img_cache[i];
         char *pip = strchr(e, '|');
         if (!pip) continue;
         int y = atoi(e);
-        if (y != prev_y) {
-            /* Effacer seulement les colonnes de l'image, pas la scrollbar */
-            printf("\033[%d;1H\033[%dX", y, width - 2);
-        }
-        printf("\033[%d;1H%s\033[0m", y, pip + 1);
-        prev_y = y;
+        char *truncated = ansi_truncate(pip + 1, img_w);
+        if (!truncated) continue;
+        printf("\033[%d;1H%s\033[%d;%dH\033[K",
+               y, truncated, y, img_w + 1);
+        free(truncated);
     }
     if (img_cache_count > 0) fflush(stdout);
 }
@@ -471,13 +492,11 @@ static void draw_results(WINDOW *win) {
         return;
     }
 
-    /* Chaque résultat occupe 3 lignes : titre / url / blanc */
     int row = 1;
     for (int idx = results_scroll; idx < results_count && row < height - 1; idx++) {
         int is_hl = (idx == results_hl);
 
         if (is_hl) {
-            /* Surligner les 2 lignes du résultat */
             wattron(win, COLOR_PAIR(CP_HIGHLIGHT));
             for (int c = 0; c < width - 1; c++) {
                 mvwaddch(win, row,     c, ' ');
@@ -486,7 +505,6 @@ static void draw_results(WINDOW *win) {
             wattroff(win, COLOR_PAIR(CP_HIGHLIGHT));
         }
 
-        /* Ligne 1 : numéro + titre en gras */
         wattron(win, COLOR_PAIR(CP_URL) | A_DIM);
         mvwprintw(win, row, 2, "%2d", idx + 1);
         wattroff(win, COLOR_PAIR(CP_URL) | A_DIM);
@@ -505,7 +523,6 @@ static void draw_results(WINDOW *win) {
         else
             wattroff(win, COLOR_PAIR(CP_TITLE) | A_BOLD);
 
-        /* Ligne 2 : URL soulignée en bleu */
         int url_max = width - title_x - 2;
         if (url_max < 4) url_max = 4;
 
@@ -519,10 +536,9 @@ static void draw_results(WINDOW *win) {
         else
             wattroff(win, COLOR_PAIR(CP_URL) | A_UNDERLINE);
 
-        row += 3;  /* titre + url + ligne vide */
+        row += 3;
     }
 
-    /* Scrollbar */
     int visible = (height - 2) / 3;
     if (visible < 1) visible = 1;
     if (results_count > visible) {
@@ -561,7 +577,11 @@ static void draw_page(WINDOW *win) {
     if (page_links_count > 0 && page_links_hl < page_links_count)
         next_link_line = link_positions[page_links_hl];
 
-    /* si = screen row (0..height-1), li = logical index in page_lines[] */
+    /* width - 2 : -1 pour scrollbar, -1 marge droite de sécurité
+     * Evite que mvwprintw enroule au bord et crée des artefacts */
+    int print_w = width - 2;
+    if (print_w < 4) print_w = 4;
+
     int si = 0;
     for (int li = page_scroll; li < page_lines_count && si < height; li++) {
         char *line = page_lines[li];
@@ -608,7 +628,7 @@ static void draw_page(WINDOW *win) {
         }
 
         wattron(win, attr);
-        mvwprintw(win, si, 0, "%.*s", width - 1, line + prefix_len);
+        mvwprintw(win, si, 0, "%.*s", print_w, line + prefix_len);
         wattroff(win, attr);
         si++;
     }
@@ -667,26 +687,17 @@ static void show_image(const char *path) {
     if (img_w < 10) img_w = 10;
     if (img_h < 5)  img_h = 5;
 
-    /* Suspendre ncurses proprement */
     def_prog_mode();
     endwin();
-
-    /* Chemin absolu pour chafa */
-    char abs_path[MAX_LEN * 2];
-    if (path[0] == '/')
-        snprintf(abs_path, sizeof(abs_path), "%s", path);
-    else
-        snprintf(abs_path, sizeof(abs_path), "%s/%s", base_dir, path);
 
     char cmd[MAX_LEN * 2];
     snprintf(cmd, sizeof(cmd),
              "chafa --size=%dx%d --colors=256 --animate=off '%s'\n"
              "printf '\\n-- Appuyez sur Entrée pour revenir --'\n"
              "read _dummy",
-             img_w, img_h, abs_path);
+             img_w, img_h, path);
     system(cmd);
 
-    /* Reprendre ncurses proprement */
     reset_prog_mode();
     setlocale(LC_ALL, "");
     clearok(curscr, TRUE);
@@ -715,7 +726,6 @@ static void play_video(const char *mp4_path, WINDOW *content_win) {
     if (dot_gif) strcpy(dot_gif, ".gif");
     if (dot_mp3) strcpy(dot_mp3, ".mp3");
 
-    /* Suspendre ncurses proprement */
     def_prog_mode();
     endwin();
 
@@ -723,7 +733,6 @@ static void play_video(const char *mp4_path, WINDOW *content_win) {
     snprintf(cmd_play, sizeof(cmd_play), "%s/play \"%s\" \"%s\"", base_dir, gif, mp3);
     system(cmd_play);
 
-    /* Reprendre ncurses proprement */
     reset_prog_mode();
     setlocale(LC_ALL, "");
     clearok(curscr, TRUE);
@@ -757,19 +766,15 @@ static void open_url(const char *url, const char *title, WINDOW *content_win) {
         return;
     }
 
-    /* Résoudre les URLs relatives vers une URL absolue */
     char resolved[2048];
     if (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0) {
-        /* Extraire l'origine de current_url (scheme://host) */
         char origin[1024] = "";
         const char *p = current_url;
-        /* Chercher "://" */
         const char *sep = strstr(p, "://");
         if (sep) {
-            sep += 3; /* après :// */
+            sep += 3;
             const char *slash = strchr(sep, '/');
             if (slash) {
-                /* scheme://host */
                 int olen = (int)(slash - current_url);
                 if (olen < (int)sizeof(origin)) {
                     strncpy(origin, current_url, olen);
@@ -780,10 +785,8 @@ static void open_url(const char *url, const char *title, WINDOW *content_win) {
             }
         }
         if (url[0] == '/') {
-            /* Chemin absolu : origin + path */
             snprintf(resolved, sizeof(resolved), "%s%s", origin, url);
         } else {
-            /* Chemin relatif : origin + répertoire courant + path */
             char dir[1024] = "";
             const char *last_slash = strrchr(current_url, '/');
             if (last_slash && last_slash > current_url + 8) {
@@ -810,7 +813,6 @@ static void open_url(const char *url, const char *title, WINDOW *content_win) {
     wrefresh(content_win);
 
     char cmd[MAX_LEN * 2];
-    /* Écrire l'URL dans un fichier temp : évite tout problème d'échappement shell */
     {   FILE *_uf = fopen("/tmp/vueko_url.txt","w");
         if (_uf) { fputs(url, _uf); fclose(_uf); } }
     snprintf(cmd, sizeof(cmd),
@@ -870,14 +872,10 @@ int main(void) {
         if (len > 0) {
             exe[len] = '\0';
             char *slash = strrchr(exe, '/');
-            if (slash) {
-                *slash = '\0';
-                strncpy(base_dir, exe, sizeof(base_dir) - 1);
-                chdir(base_dir);
-            }
-        } else {
-            getcwd(base_dir, sizeof(base_dir));
+            if (slash) { *slash = '\0'; strncpy(base_dir, exe, sizeof(base_dir)-1); }
         }
+        if (base_dir[0] == '\0') getcwd(base_dir, sizeof(base_dir));
+        chdir(base_dir);
         FILE *dbg = fopen("/tmp/vueko.log", "w");
         if (dbg) { fprintf(dbg, "base_dir: %s\n", base_dir); fclose(dbg); }
     }
@@ -949,7 +947,6 @@ int main(void) {
         }
 
         if (mode == MODE_SEARCH) {
-            /* Chaque résultat = 3 lignes, visible = content_h / 3 */
             int vis = content_h / 3;
             if (vis < 1) vis = 1;
             if (results_hl < results_scroll)
@@ -962,12 +959,15 @@ int main(void) {
                 int st;
                 if (waitpid(images_render_pid, &st, WNOHANG) > 0) {
                     images_render_pid = -1;
-                    img_cache_clear();   /* forcer redraw des images */
+                    img_cache_clear();
                     load_rendered_page("datas/cache/page.json");
                 }
             }
             if (page_scroll < 0) page_scroll = 0;
-            int max_scroll = page_lines_count - content_h;
+            /* max_scroll : on soustrait content_h mais on ajoute SCROLL_BOTTOM_MARGIN
+             * pour que les dernières lignes restent atteignables même si render.py
+             * n'a pas ajouté de padding, et sans couper le contenu visible. */
+            int max_scroll = page_lines_count - content_h + SCROLL_BOTTOM_MARGIN;
             if (max_scroll < 0) max_scroll = 0;
             if (page_scroll > max_scroll) page_scroll = max_scroll;
             draw_page(content_win);
@@ -995,11 +995,9 @@ int main(void) {
             fill_bar(status_win, CP_STATUSBAR, left, NULL, right);
         }
 
-        /* Marquer tout le contenu comme corrompu → ncurses réécrit tout par-dessus les résidus chafa */
         if (mode == MODE_PAGE) redrawwin(content_win);
         doupdate();
         if (mode == MODE_PAGE) {
-            /* Effacer les anciennes positions image */
             if (img_old_ys_count > 0) {
                 int _tw = getmaxx(stdscr);
                 for (int _i = 0; _i < img_old_ys_count; _i++) {
@@ -1011,9 +1009,16 @@ int main(void) {
             }
             draw_images_overlay(content_win);
         }
-        halfdelay(1);
-        ch = getch();
-        cbreak();
+        /* halfdelay en 1/10s : 1 (réactif) pendant 2s après un input,
+         * 10 (économique) au repos pour ne pas brûler le CPU */
+        {
+            static time_t last_input = 0;
+            int hd = (time(NULL) - last_input < 2) ? 1 : 10;
+            halfdelay(hd);
+            ch = getch();
+            cbreak();
+            if (ch != ERR) last_input = time(NULL);
+        }
 
         if (ch == 'q' || ch == 'Q' || ch == 27) break;
 
@@ -1076,7 +1081,7 @@ int main(void) {
                         page_scroll = link_positions[page_links_hl];
                     }
                 } else {
-                    if (page_scroll < page_lines_count - content_h)
+                    if (page_scroll < page_lines_count - content_h + SCROLL_BOTTOM_MARGIN)
                         page_scroll++;
                 }
             }
@@ -1107,12 +1112,10 @@ int main(void) {
                          results[results_hl].title,
                          content_win);
             } else if (mode == MODE_PAGE) {
-                /* URL du lien courant (panneau ouvert ou non) */
                 const char *target_url  = (page_links_count > 0) ? page_links[page_links_hl].url  : NULL;
                 const char *target_text = (page_links_count > 0) ? page_links[page_links_hl].text : NULL;
 
                 if (target_url && strncmp(target_url, "file://__img__", 14) == 0) {
-                    /* Lien image : afficher directement */
                     show_image(target_url + 14);
                 } else if (target_url && strncmp(target_url, "file://__video__", 16) == 0) {
                     play_video(target_url + 16, content_win);
