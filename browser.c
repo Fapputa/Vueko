@@ -385,19 +385,27 @@ static void draw_images_overlay(WINDOW *win) {
             char imgpath[MAX_LEN];
             int orig_w, orig_h;
             parse_im_line(line, imgpath, MAX_LEN, &orig_w, &orig_h);
+
+            /* Construire le chemin absolu */
+            char abs_imgpath[MAX_LEN * 2];
+            if (imgpath[0] == '/')
+                snprintf(abs_imgpath, sizeof(abs_imgpath), "%s", imgpath);
+            else
+                snprintf(abs_imgpath, sizeof(abs_imgpath), "%s/%s", base_dir, imgpath);
+
             int img_h = calc_img_h(orig_w, orig_h, img_w, height);
             for (int _ri = 0; _ri < img_real_count; _ri++)
                 if (img_real_line[_ri] == li) { img_h = img_real_h[_ri]; break; }
             if (img_h < 1) img_h = 1;
 
-            if (access(imgpath, F_OK) != 0) { si += img_h; continue; }
+            if (access(abs_imgpath, F_OK) != 0) { si += img_h; continue; }
 
             int term_y = by + si + 1;
 
             char cmd[MAX_LEN * 2];
             snprintf(cmd, sizeof(cmd),
                      "chafa --size=%dx%d --colors=256 --animate=off '%s' 2>/dev/null",
-                     img_w, img_h, imgpath);
+                     img_w, img_h, abs_imgpath);
 
             FILE *p = popen(cmd, "r");
             if (!p) { si += img_h; continue; }
@@ -663,12 +671,19 @@ static void show_image(const char *path) {
     def_prog_mode();
     endwin();
 
+    /* Chemin absolu pour chafa */
+    char abs_path[MAX_LEN * 2];
+    if (path[0] == '/')
+        snprintf(abs_path, sizeof(abs_path), "%s", path);
+    else
+        snprintf(abs_path, sizeof(abs_path), "%s/%s", base_dir, path);
+
     char cmd[MAX_LEN * 2];
     snprintf(cmd, sizeof(cmd),
              "chafa --size=%dx%d --colors=256 --animate=off '%s'\n"
              "printf '\\n-- Appuyez sur Entrée pour revenir --'\n"
              "read _dummy",
-             img_w, img_h, path);
+             img_w, img_h, abs_path);
     system(cmd);
 
     /* Reprendre ncurses proprement */

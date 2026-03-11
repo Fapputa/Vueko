@@ -96,31 +96,9 @@ class Renderer:
         self._inline_buf = []
         if text:
             first = len(self.lines)
-            # Cas : texte == lien unique → ligne ##LK pour highlight facile côté C
-            if (len(self._pending_links) == 1
-                    and " ".join(self._pending_links[0]["text"].split()) == text):
-                lnk = self._pending_links[0]
-                line_text = "##LK " + text
-                self.lines.append(line_text)
-                self.links.append({
-                    "text": lnk["text"], "url": lnk["url"],
-                    "line": first, "col_start": 0, "col_end": len(text)
-                })
-            else:
-                self.wrap(prefix, text)
-                # Pour chaque lien, trouver sa position dans la ligne produite
-                wrapped_text = text
-                for lnk in self._pending_links:
-                    lt = " ".join(lnk["text"].split())
-                    col = wrapped_text.find(lt)
-                    if col < 0:
-                        col = 0
-                    self.links.append({
-                        "text": lnk["text"], "url": lnk["url"],
-                        "line": first,
-                        "col_start": len(prefix) + col,
-                        "col_end":   len(prefix) + col + len(lt)
-                    })
+            self.wrap(prefix, text)
+            for lnk in self._pending_links:
+                self.links.append({"text": lnk["text"], "url": lnk["url"], "line": first})
         self._pending_links = []
 
     def blank(self):
@@ -332,6 +310,9 @@ def main():
         r.lines += ["##HR", ""]
 
     body = soup.find("main") or soup.find("article") or soup.find("body") or soup
+    # Si le conteneur choisi ne contient aucune img, utiliser body
+    if body.name != "body" and not body.find("img"):
+        body = soup.find("body") or soup
     r.process(body)
     r._flush()
 
