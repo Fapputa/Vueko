@@ -343,27 +343,15 @@ static void parse_im_line(const char *line,
     }
 }
 
-/* Largeur d'affichage réelle : taille naturelle de l'image en colonnes,
-   plafonnée à term_w. ~8 pixels par colonne de terminal. */
-static int calc_img_display_w(int orig_w, int term_w) {
-    if (orig_w > 0) {
-        int cols = orig_w / 8;
-        if (cols < 4)      cols = 4;
-        if (cols > term_w) cols = term_w;
-        return cols;
-    }
-    return term_w;  /* dimensions inconnues → pleine largeur */
-}
-
 static int calc_img_h(int orig_w, int orig_h, int term_w, int term_h) {
-    /* Cellule terminal ≈ 8px large × 16px haute → ratio vertical = 0.5 */
-    int disp_w = calc_img_display_w(orig_w, term_w);
+    /* Chaque cellule terminal ≈ 2× plus haute que large (ratio 1:2) */
     if (orig_w > 0 && orig_h > 0) {
-        int h = (int)((double)orig_h / (double)orig_w * (double)disp_w * 0.5);
-        if (h < 3)          h = 3;
-        if (h > term_h / 2) h = term_h / 2;
+        int h = (int)((double)orig_h / (double)orig_w * (double)term_w * 0.5);
+        if (h < 3)        h = 3;
+        if (h > term_h / 2) h = term_h / 2;  /* max : moitié écran */
         return h;
     }
+    /* Pas de métadonnées : 1/4 écran par défaut (moins invasif) */
     int h = term_h / 4;
     if (h < 4) h = 4;
     return h;
@@ -380,68 +368,77 @@ static void draw_images_overlay(WINDOW *win) {
     getbegyx(win, by, bx);
     (void)bx;
 
-    int img_h = height / 2;  /* sera recalculé par image via calc_img_h */
-    int img_w = width - 2;
+    int img_w = width - 3;  /* -3 : 1 marge gauche + 1 marge droite + 1 colonne scrollbar */
 
     /* Reconstruire le cache si le scroll a changé */
     if (img_cache_scroll != page_scroll) {
         img_cache_clear();
         img_cache_scroll = page_scroll;
 
-        for (int i = 0; i < height && img_cache_count < IMG_CACHE_LINES; i++) {
-            int li = page_scroll + i;
-            if (li >= page_lines_count) break;
+        /* si = screen row, li = logical index — must stay in sync with draw_page */
+        int si = 0;
+        for (int li = page_scroll; li < page_lines_count && si < height
+                                   && img_cache_count < IMG_CACHE_LINES; li++) {
             char *line = page_lines[li];
-            if (strncmp(line, "##IM ", 5) != 0) continue;
+            if (strncmp(line, "##IM ", 5) != 0) { si++; continue; }
 
             char imgpath[MAX_LEN];
             int orig_w, orig_h;
             parse_im_line(line, imgpath, MAX_LEN, &orig_w, &orig_h);
-            img_h = calc_img_h(orig_w, orig_h, img_w, height);
-            if (access(imgpath, F_OK) != 0) { i += img_h - 1; continue; }
+            int img_h = calc_img_h(orig_w, orig_h, img_w, height);
+            for (int _ri = 0; _ri < img_real_count; _ri++)
+                if (img_real_line[_ri] == li) { img_h = img_real_h[_ri]; break; }
+            if (img_h < 1) img_h = 1;
 
-            int term_y = by + i + 1;
+            if (access(imgpath, F_OK) != 0) { si += img_h; continue; }
 
-            int disp_w = calc_img_display_w(orig_w, img_w);
+            int term_y = by + si + 1;
+
             char cmd[MAX_LEN * 2];
             snprintf(cmd, sizeof(cmd),
                      "chafa --size=%dx%d --colors=256 --animate=off '%s' 2>/dev/null",
-                     disp_w, img_h, imgpath);
+                     img_w, img_h, imgpath);
 
             FILE *p = popen(cmd, "r");
-            if (!p) { i += img_h - 1; continue; }
+            if (!p) { si += img_h; continue; }
 
             char row[8192];
             int r = 0;
-            while (r < 999 && fgets(row, sizeof(row), p)
+            while (r < img_h && fgets(row, sizeof(row), p)
                    && img_cache_count < IMG_CACHE_LINES) {
                 int len = strlen(row);
                 if (len > 0 && row[len - 1] == '\n') row[len - 1] = '\0';
-                /* Stocker "Y|ligne_ansi" */
                 char entry[8200];
                 snprintf(entry, sizeof(entry), "%d|%s", term_y + r, row);
                 img_cache[img_cache_count++] = strdup(entry);
                 r++;
             }
             pclose(p);
-            if (img_real_count < 256) {
-                img_real_line[img_real_count] = page_scroll + i;
-                img_real_h[img_real_count]    = r;
+            int found = 0;
+            for (int k = 0; k < img_real_count; k++)
+                if (img_real_line[k] == li) { img_real_h[k] = r > 0 ? r : img_h; found = 1; break; }
+            if (!found && img_real_count < 256) {
+                img_real_line[img_real_count] = li;
+                img_real_h[img_real_count]    = r > 0 ? r : img_h;
                 img_real_count++;
             }
-            i += img_h - 1;
+            si += img_h;
         }
     }
 
-    /* Écrire le cache sur le terminal */
+    /* Écrire le cache sur le terminal.
+     * [%dX efface N colonnes depuis la position courante sans toucher la suite —
+     * la scrollbar en colonne (width) est ainsi préservée. */
     int prev_y = -1;
     for (int i = 0; i < img_cache_count; i++) {
         char *e = img_cache[i];
         char *pip = strchr(e, '|');
         if (!pip) continue;
         int y = atoi(e);
-        /* Effacer la ligne avant d'écrire (supprime les résidus ncurses) */
-        if (y != prev_y) printf("\033[%d;1H\033[2K", y);
+        if (y != prev_y) {
+            /* Effacer seulement les colonnes de l'image, pas la scrollbar */
+            printf("\033[%d;1H\033[%dX", y, width - 2);
+        }
         printf("\033[%d;1H%s\033[0m", y, pip + 1);
         prev_y = y;
     }
@@ -556,10 +553,9 @@ static void draw_page(WINDOW *win) {
     if (page_links_count > 0 && page_links_hl < page_links_count)
         next_link_line = link_positions[page_links_hl];
 
-    for (int i = 0; i < height; i++) {
-        int li = page_scroll + i;
-        if (li >= page_lines_count) break;
-
+    /* si = screen row (0..height-1), li = logical index in page_lines[] */
+    int si = 0;
+    for (int li = page_scroll; li < page_lines_count && si < height; li++) {
         char *line = page_lines[li];
         int attr = COLOR_PAIR(CP_NORMAL);
         int prefix_len = 0;
@@ -567,14 +563,14 @@ static void draw_page(WINDOW *win) {
         if (strncmp(line, "##IM ", 5) == 0) {
             char _ip[MAX_LEN]; int _ow, _oh;
             parse_im_line(line, _ip, MAX_LEN, &_ow, &_oh);
-            int img_h = calc_img_h(_ow, _oh, width - 2, height);
+            int img_h = calc_img_h(_ow, _oh, width - 3, height);
             for (int _ri = 0; _ri < img_real_count; _ri++)
                 if (img_real_line[_ri] == li) { img_h = img_real_h[_ri]; break; }
-            for (int r = 0; r < img_h && i + r < height; r++) {
-                wmove(win, i + r, 0);
+            for (int r = 0; r < img_h && si + r < height; r++) {
+                wmove(win, si + r, 0);
                 wclrtoeol(win);
             }
-            i += img_h - 1;
+            si += img_h;
             continue;
 
         } else if (strncmp(line, "##H1 ", 5) == 0) {
@@ -597,14 +593,16 @@ static void draw_page(WINDOW *win) {
         } else if (strncmp(line, "##HR", 4) == 0) {
             wattron(win, COLOR_PAIR(CP_SEPARATOR) | A_DIM);
             for (int c = 0; c < width - 1; c++)
-                mvwaddch(win, i, c, ACS_HLINE);
+                mvwaddch(win, si, c, ACS_HLINE);
             wattroff(win, A_DIM);
+            si++;
             continue;
         }
 
         wattron(win, attr);
-        mvwprintw(win, i, 0, "%.*s", width - 1, line + prefix_len);
+        mvwprintw(win, si, 0, "%.*s", width - 1, line + prefix_len);
         wattroff(win, attr);
+        si++;
     }
 
     if (page_lines_count > height) {
@@ -998,7 +996,7 @@ int main(void) {
             }
             draw_images_overlay(content_win);
         }
-        halfdelay(5);
+        halfdelay(1);
         ch = getch();
         cbreak();
 
@@ -1032,7 +1030,10 @@ int main(void) {
         }
 
         else if (ch == '\t' && mode == MODE_PAGE) {
-            links_panel_open = !links_panel_open;
+            if (page_links_count > 0) {
+                page_links_hl = (page_links_hl + 1) % page_links_count;
+                page_scroll = link_positions[page_links_hl];
+            }
         }
 
         else if (ch == KEY_UP) {

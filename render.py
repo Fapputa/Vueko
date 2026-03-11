@@ -69,24 +69,22 @@ class Renderer:
 
     def _find_image(self, src):
         """Trouve le fichier image téléchargé correspondant au src HTML."""
-        if not src:
+        if not self.imgs:
             return None
-        src_noq = src.split("?")[0]  # sans query string (?cachebuster=xxx)
-
-        # 1. Chercher dans imgmap : exact, puis sans query string, puis par suffixe
-        for key, fname in self.imgmap.items():
-            key_noq = key.split("?")[0]
-            if (key == src
-                    or key_noq == src_noq
-                    or key.endswith(src)
-                    or key_noq.endswith(src_noq)
-                    or src.endswith(key.split("//", 1)[-1])
-                    or src_noq.endswith(key_noq.split("//", 1)[-1])):
-                path = os.path.join(IMAGE_DIR, fname)
-                if os.path.exists(path):
-                    return path
-
-        # 2. Fallback ordre d'apparition (quand imgmap absent/incomplet)
+        # 1. Chercher dans imgmap par URL exacte
+        if src and src in self.imgmap:
+            fname = self.imgmap[src]
+            path  = os.path.join(IMAGE_DIR, fname)
+            if os.path.exists(path):
+                return path
+        # 2. Chercher dans imgmap par URL avec/sans scheme
+        if src:
+            for key, fname in self.imgmap.items():
+                if key.endswith(src) or src.endswith(key.split("//", 1)[-1]):
+                    path = os.path.join(IMAGE_DIR, fname)
+                    if os.path.exists(path):
+                        return path
+        # 3. Fallback : ordre d'apparition (ancien comportement)
         if self.img_i < len(self.imgs):
             path = os.path.join(IMAGE_DIR, self.imgs[self.img_i])
             self.img_i += 1
@@ -142,6 +140,12 @@ class Renderer:
         if n == "a":
             href = (node.get("href") or "").strip()
             text = " ".join(collect_inline_text(node).split())
+            # Si le <a> contient des images, les traiter d'abord
+            has_img = node.find("img") is not None
+            if has_img:
+                for c in node.children:
+                    self.process(c, in_block=in_block)
+                return
             if not text: return
             if href and href not in ("#", "javascript:void(0)", "javascript:;", ""):
                 self._inline_buf.append(text)
@@ -249,22 +253,12 @@ class Renderer:
         if n == "table":
             self._flush()
             self.blank()
-            inner = self.w - 4  # largeur intérieure entre les │
-            self.lines.append("  ┌" + "─" * inner + "┐")
+            # Traiter chaque cellule avec process() pour capturer images et texte
             for row in node.find_all("tr"):
-                cells = [" ".join(collect_inline_text(c).split())
-                         for c in row.find_all(["td", "th"])]
-                if not any(cells):
-                    continue
-                # Construire la ligne en tronquant au besoin
-                line_content = " │ ".join(cells)
-                # Tronquer pour tenir dans la largeur intérieure
-                if len(line_content) > inner - 1:
-                    line_content = line_content[:inner - 2] + "…"
-                # Padding à droite pour aligner le │ de fermeture
-                padded = line_content.ljust(inner)
-                self.lines.append("  │ " + padded[:inner - 1] + "│")
-            self.lines.append("  └" + "─" * inner + "┘")
+                for cell in row.find_all(["td", "th"]):
+                    for c in cell.children:
+                        self.process(c, in_block=True)
+                self._flush()
             self.blank()
             return
 
@@ -315,7 +309,7 @@ def main():
         r.lines.append(f"##H1 {title_tag.get_text().strip()}")
         r.lines += ["##HR", ""]
 
-    body = soup.find("body") or soup
+    body = soup.find("main") or soup.find("article") or soup.find("body") or soup
     r.process(body)
     r._flush()
 

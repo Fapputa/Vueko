@@ -174,7 +174,7 @@ with sync_playwright() as p:
         document.querySelectorAll('*').forEach(el => {
             const bg = window.getComputedStyle(el).backgroundImage;
             if (bg && bg !== 'none') {
-                const m = bg.match(/url\(["']?([^"')]+)["']?\)/);
+                const m = bg.match(/url[(]["']?([^"')]+)["']?[)]/);
                 if (m && m[1] && !m[1].startsWith('data:')) imgs.add(m[1]);
             }
         });
@@ -227,7 +227,7 @@ def download_image(args):
     except: pass
 
 threads = [threading.Thread(target=download_image, args=((i,u),))
-           for i,u in enumerate(image_urls[:100])]
+           for i,u in enumerate(image_urls[:30])]
 for t in threads: t.start()
 for t in threads: t.join(timeout=12)
 print(f"[GET] {nimg[0]} images téléchargées")
