@@ -1,163 +1,259 @@
-import sys
-import os
-from playwright.sync_api import sync_playwright
-import shutil
+#!/usr/bin/env python3
+"""
+GET.py — Sans dépendance filetype, détection par magic bytes
+Images en parallèle avec requests
+"""
+import sys, os, shutil, threading
 from urllib.parse import urljoin
-import filetype 
+from playwright.sync_api import sync_playwright
+try:
+    from playwright_stealth import stealth_sync as _stealth
+except ImportError:
+    _stealth = None
+import requests
+
+if len(sys.argv) < 2:
+    sys.exit(1)
 
 URL = sys.argv[1]
-
-BLOCKED_RESOURCES = ['image', 'media', 'font', 'stylesheet', 'script']
-BLOCKED_URLS = ['doubleclick.net', 'google-analytics.com', 'quantserve.com', 'wikia-services.com/api/ad-info']
+BLOCKED_ADS   = ["doubleclick.net","google-analytics.com","googlesyndication.com",
+                  "adnxs.com","amazon-adsystem.com","scorecardresearch.com"]
+BLOCKED_TYPES = {"font"}  # scripts autorisés pour lazy loading
 IMAGE_DIR = "datas/images"
+VIDEO_DIR = "datas/videos"
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
-def block_ads_and_trackers(route):
-    for url_part in BLOCKED_URLS:
-        if url_part in route.request.url:
-            route.abort()
-            return
-    
-    if route.request.resource_type in BLOCKED_RESOURCES:
-        route.abort()
-    else:
-        route.continue_()
+os.makedirs("datas/cache", exist_ok=True)
 
-def get_image_extension(content_type, data=None):
+# ── Détection par magic bytes (sans filetype) ────────────────────────────────
+MAGIC = [
+    (b'\xff\xd8\xff',           ".jpg"),
+    (b'\x89PNG\r\n',            ".png"),
+    (b'GIF87a',                 ".gif"),
+    (b'GIF89a',                 ".gif"),
+    (b'RIFF',                   ".webp"),  # RIFF????WEBP
+    (b'\x00\x00\x00\x1cftyp',  ".avif"),  # AVIF/HEIF
+    (b'\x00\x00\x00\x18ftyp',  ".avif"),
+    (b'\x00\x00\x00\x20ftyp',  ".avif"),
+    (b'\xff\x0a',               ".jxl"),   # JPEG-XL
+    (b'\x00\x00\x00\x0cJXL ',  ".jxl"),
+    (b'<svg',                   ".svg"),
+    (b'\x00\x00\x00',           ".mp4"),   # ftyp boxes
+    (b'\x1aE\xdf\xa3',         ".webm"),
+]
+def guess_ext_magic(data: bytes, content_type: str = "") -> str:
     if data:
-        kind = filetype.guess(data)
-        if kind:
-            return "." + kind.extension
-    
-    content_type = content_type.lower()
-    if 'image/jpeg' in content_type or 'image/jpg' in content_type:
-        return ".jpg"
-    elif 'image/png' in content_type:
-        return ".png"
-    elif 'image/gif' in content_type:
-        return ".gif"
-    elif 'image/webp' in content_type:
-        return ".webp"
-    elif 'image/svg+xml' in content_type:
-        return ".svg"
-    else:
-        return ".bin"
+        for magic, ext in MAGIC:
+            if data[:len(magic)] == magic:
+                # Cas WEBP : vtyp RIFF + WEBP à offset 8
+                if ext == ".webp" and len(data) > 12 and data[8:12] != b'WEBP':
+                    return ".bin"
+                return ext
+    ct = content_type.lower()
+    for m, e in [("jpeg",".jpg"),("jpg",".jpg"),("png",".png"),("gif",".gif"),
+                 ("webp",".webp"),("svg",".svg"),("mp4",".mp4"),("webm",".webm")]:
+        if m in ct: return e
+    return ".bin"
 
-# --- Extracting URLs
-image_urls = []
-link_urls = []
+def is_image(ext): return ext in (".jpg",".jpeg",".png",".gif",".webp",".svg",".avif",".jxl")
+def is_video(ext): return ext in (".mp4",".webm")
 
+def block_ads(route):
+    for b in BLOCKED_ADS:
+        if b in route.request.url: route.abort(); return
+    if route.request.resource_type in BLOCKED_TYPES: route.abort()
+    else: route.continue_()
+
+image_urls, video_urls, link_urls = [], [], []
+
+# ── Phase 1 : Playwright ─────────────────────────────────────────────────────
 with sync_playwright() as p:
-    timeout_ms = 30000 
-    
-    browser = p.chromium.launch(headless=True)
-    page = browser.new_page(
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        locale="fr-FR",
+    browser = p.chromium.launch(
+        headless=True,
+        args=[
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-web-security",
+        ]
     )
-    
-    page.route("**/*", block_ads_and_trackers)
-
+    ctx = browser.new_context(
+        user_agent=UA,
+        locale="fr-FR",
+        viewport={"width": 1280, "height": 800},
+        extra_http_headers={"Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8"}
+    )
+    ctx.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
+    page = ctx.new_page()
+    if _stealth: _stealth(page)
+    page.route("**/*", block_ads)
     try:
-        page.goto(URL, wait_until=None, timeout=timeout_ms)
-        page.wait_for_timeout(5000)
-        
-        with open("datas/cache/temp.html","w") as f:
+        page.goto(URL, wait_until="networkidle", timeout=30000)
+        # Scroll progressif pour déclencher lazy loading et galeries JS
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight/4)")
+        page.wait_for_timeout(1000)
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight/2)")
+        page.wait_for_timeout(1000)
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight*3/4)")
+        page.wait_for_timeout(1000)
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.wait_for_timeout(2000)
+        # Remonter en haut pour que les images above-the-fold soient aussi chargées
+        page.evaluate("window.scrollTo(0, 0)")
+        page.wait_for_timeout(1500)
+        # Collecter aussi les images dans figure/lightbox (Fandom galleries)
+        page.evaluate("""() => {
+            document.querySelectorAll('figure[data-image-key], .gallery-image-wrapper img, .lightbox img, [class*="gallery"] img').forEach(el => {
+                if (el.dataset && el.dataset.imageName) {
+                    el.src = el.dataset.imageName;
+                }
+            });
+        }""")
+        with open("datas/cache/temp.html","w",encoding="utf-8") as f:
             f.write(page.content())
-            
     except Exception as e:
-        pass
+        try:
+            with open("datas/cache/temp.html","w",encoding="utf-8") as f:
+                f.write(page.content())
+        except: pass
 
-    links_elements = page.query_selector_all("a")
-    images_elements = page.query_selector_all("img")
-    
-    for image in images_elements:
-        src = image.get_attribute("src") 
-        if not src:
-            srcset = image.get_attribute("srcset")
-            if srcset:
-                src = srcset.split(',')[0].strip().split(' ')[0] 
-        if not src:
-            continue
-            
-        link = urljoin(URL, src)
-        if link.startswith("data:") or len(link) < 5:
-            continue
-            
-        image_urls.append(link)
-        
-    for a in links_elements:
+    for a in page.query_selector_all("a"):
         href = a.get_attribute("href")
-        if not href:
-            continue
+        if href: link_urls.append(urljoin(URL, href))
 
-        link = urljoin(URL, href)
-        link_urls.append(link)
-    
+    # Collecter via attributs HTML + currentSrc JS
+    seen = set()
+    for img in page.query_selector_all("img"):
+        # Collecter TOUS les attributs src possibles (pas juste le premier trouvé)
+        for attr in ("src","data-src","data-lazy-src","data-original","data-url",
+                     "data-delayed-url","data-actual","data-canonical-src"):
+            src = img.get_attribute(attr)
+            if src and not src.startswith("data:") and src not in seen:
+                seen.add(src)
+                image_urls.append(urljoin(URL, src))
+        ss = img.get_attribute("srcset") or img.get_attribute("data-srcset") or ""
+        if ss:
+            # Prendre la plus grande image du srcset
+            candidates = []
+            for part in ss.split(","):
+                p2 = part.strip().split()
+                if p2:
+                    u2 = p2[0]
+                    w  = int(p2[1].rstrip("w")) if len(p2)>1 and p2[1].endswith("w") else 0
+                    candidates.append((w, u2))
+            if candidates:
+                best = sorted(candidates)[-1][1]
+                full = urljoin(URL, best)
+                if full not in seen:
+                    seen.add(full)
+                    image_urls.append(full)
+
+    # currentSrc via JS
+    js_imgs = page.evaluate("""() => {
+        const imgs = new Set();
+        // Toutes les images du DOM avec tous les attributs possibles
+        document.querySelectorAll('img').forEach(i => {
+            for (const attr of ['src','currentSrc','data-src','data-lazy-src',
+                                 'data-original','data-url','data-full','data-image-src',
+                                 'data-hi-res-src','data-large-src']) {
+                const s = i[attr] || i.getAttribute(attr);
+                if (s && !s.startsWith('data:') && s.startsWith('http')) {
+                    imgs.add(s); break;
+                }
+            }
+            // currentSrc toujours (image réellement affichée)
+            if (i.currentSrc && !i.currentSrc.startsWith('data:')) imgs.add(i.currentSrc);
+        });
+        // Fandom lightbox / gallery
+        document.querySelectorAll('a[data-image-name], figure[data-image-key]').forEach(el => {
+            const s = el.getAttribute('data-src') || el.getAttribute('data-image-src') ||
+                      el.querySelector('img')?.src;
+            if (s && !s.startsWith('data:')) imgs.add(s);
+        });
+        // CSS background-image sur tous les éléments visibles
+        document.querySelectorAll('*').forEach(el => {
+            const bg = window.getComputedStyle(el).backgroundImage;
+            if (bg && bg !== 'none') {
+                const m = bg.match(/url\(["']?([^"')]+)["']?\)/);
+                if (m && m[1] && !m[1].startsWith('data:')) imgs.add(m[1]);
+            }
+        });
+        return [...imgs];
+    }""")
+    for src in js_imgs:
+        if src not in seen:
+            seen.add(src)
+            image_urls.append(src)
+
+    # Vidéos
+    for v in page.query_selector_all("video, source[src]"):
+        src = v.get_attribute("src")
+        if src and not src.startswith("data:"): video_urls.append(urljoin(URL,src))
+
+    ctx.close()
     browser.close()
 
-# --- Downloading imgs
+print(f"[GET] Page OK — {len(image_urls)} images, {len(video_urls)} vidéos")
 
-if os.path.exists(IMAGE_DIR):
-    shutil.rmtree(IMAGE_DIR)
+# ── Phase 2 : images en parallèle ────────────────────────────────────────────
+if os.path.exists(IMAGE_DIR): shutil.rmtree(IMAGE_DIR)
 os.makedirs(IMAGE_DIR, exist_ok=True)
 
-nimg = 0
+HEADERS = {"User-Agent": UA, "Referer": URL,
+           "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"}
+lock  = threading.Lock()
+nimg  = [0]
+imgmap = {}
 
-with sync_playwright() as p:
-    browser = p.chromium.launch(headless=True)
-    
-    user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    
-    full_headers = {
-        "Referer": URL,
-        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
-        "User-Agent": user_agent
-    }
-    
-    context = browser.new_context(
-        user_agent=user_agent, 
-        extra_http_headers=full_headers 
-    )
-    page = context.new_page() 
-    
-    for link in image_urls:
-        data = None
-        content_type = ""
-        
-        try:
-            response = page.goto(link, timeout=10000) 
-            
-            if response.status >= 400:
-                continue
-            
-            data = response.body()
-            content_type = response.headers.get('content-type', '')
-            
-        except Exception as e:
-            continue 
-            
-        if not data:
-            continue
-            
-        ext = get_image_extension(content_type, data)
+def download_image(args):
+    idx, url = args
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=8)
+        if r.status_code >= 400 or len(r.content) < 64: return
+        ct  = r.headers.get("content-type", "")
+        ext = guess_ext_magic(r.content, ct)
+        # Si magic bytes inconnus mais Content-Type est clairement une image → forcer .jpg
+        if ext == ".bin" and "image/" in ct:
+            ext = ".jpg"
+        if not is_image(ext): return
+        with lock:
+            n = nimg[0]; nimg[0] += 1
+        # Nommer avec index d'origine pour conserver l'ordre de la page
+        fname = f"img{idx:03d}{ext}"
+        with open(os.path.join(IMAGE_DIR, fname), "wb") as f:
+            f.write(r.content)
+        with lock:
+            imgmap[url] = fname
+    except: pass
 
-        filename = os.path.join(IMAGE_DIR, f"img{nimg}{ext}")
-        with open(filename, "wb") as f:
-            f.write(data)
+threads = [threading.Thread(target=download_image, args=((i,u),))
+           for i,u in enumerate(image_urls[:100])]
+for t in threads: t.start()
+for t in threads: t.join(timeout=12)
+print(f"[GET] {nimg[0]} images téléchargées")
+import json as _j
+with open("datas/cache/imgmap.json","w") as f: _j.dump(imgmap,f)
 
-        nimg += 1
-        
-    page.close() 
-    browser.close() 
+# ── Phase 3 : vidéos ─────────────────────────────────────────────────────────
+if os.path.exists(VIDEO_DIR): shutil.rmtree(VIDEO_DIR)
+os.makedirs(VIDEO_DIR, exist_ok=True)
+nvid = 0
+for url in video_urls[:3]:
+    try:
+        r = requests.get(url, headers={"User-Agent":UA,"Referer":URL},
+                         timeout=20, stream=True)
+        if r.status_code >= 400: continue
+        first = next(r.iter_content(16), b"")
+        ext = guess_ext_magic(first, r.headers.get("content-type",""))
+        if not is_video(ext): continue
+        path = os.path.join(VIDEO_DIR, f"vid{nvid}{ext}")
+        with open(path, "wb") as f:
+            f.write(first)
+            for chunk in r.iter_content(65536): f.write(chunk)
+        nvid += 1
+    except: pass
 
-# --- saving links
-
-with open("datas/cache/templink.csv","w") as f:
-    pass 
-
-for link in link_urls:
-    with open("datas/cache/templink.csv","a") as f:
-        f.write(link + "\n")
+# ── Liens ─────────────────────────────────────────────────────────────────────
+with open("datas/cache/templink.csv","w",encoding="utf-8") as f:
+    for l in link_urls: f.write(l+"\n")
+print("[GET] Terminé.")
