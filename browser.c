@@ -505,9 +505,16 @@ static void draw_results(WINDOW *win) {
             wattroff(win, COLOR_PAIR(CP_HIGHLIGHT));
         }
 
-        wattron(win, COLOR_PAIR(CP_URL) | A_DIM);
+        /* Numéro : surligné si sélectionné */
+        if (is_hl)
+            wattron(win, COLOR_PAIR(CP_HIGHLIGHT) | A_BOLD);
+        else
+            wattron(win, COLOR_PAIR(CP_URL) | A_DIM);
         mvwprintw(win, row, 2, "%2d", idx + 1);
-        wattroff(win, COLOR_PAIR(CP_URL) | A_DIM);
+        if (is_hl)
+            wattroff(win, COLOR_PAIR(CP_HIGHLIGHT) | A_BOLD);
+        else
+            wattroff(win, COLOR_PAIR(CP_URL) | A_DIM);
 
         int title_x   = 6;
         int title_max = width - title_x - 2;
@@ -526,6 +533,7 @@ static void draw_results(WINDOW *win) {
         int url_max = width - title_x - 2;
         if (url_max < 4) url_max = 4;
 
+        /* URL + site : toute la ligne surlignée */
         if (is_hl)
             wattron(win, COLOR_PAIR(CP_HIGHLIGHT) | A_UNDERLINE);
         else
@@ -1008,16 +1016,43 @@ int main(void) {
                 fflush(stdout);
             }
             draw_images_overlay(content_win);
+
+            /* Redessiner la scrollbar par-dessus chafa via ANSI direct
+             * (ncurses l'a dessinée avant l'overlay, chafa l'écrase) */
+            if (page_lines_count > content_h) {
+                int sb_col  = width;          /* colonne 1-indexed */
+                int sb_h    = content_h;
+                int sb_row0 = 3;              /* ligne de début (après topbar+addrbar) */
+                int th = (sb_h * sb_h) / page_lines_count;
+                if (th < 1) th = 1;
+                int tp = (page_scroll * (sb_h - th)) / (page_lines_count - sb_h);
+                if (tp > sb_h - th) tp = sb_h - th;
+                /* Rail : blanc dim */
+                printf("\033[2m");
+                for (int i = 0; i < sb_h; i++)
+                    printf("\033[%d;%dH|", sb_row0 + i, sb_col);
+                /* Poignée : blanc gras */
+                printf("\033[0m\033[1m");
+                for (int i = 0; i < th; i++)
+                    printf("\033[%d;%dH█", sb_row0 + tp + i, sb_col);
+                printf("\033[0m");
+                fflush(stdout);
+            }
         }
-        /* halfdelay en 1/10s : 1 (réactif) pendant 2s après un input,
-         * 10 (économique) au repos pour ne pas brûler le CPU */
+        /* halfdelay en 1/10s :
+         *   1  (100ms) pendant 0.5s après le dernier input  → réactif
+         *  30  (3s)    au repos                             → économique */
         {
-            static time_t last_input = 0;
-            int hd = (time(NULL) - last_input < 2) ? 1 : 10;
+            static struct timespec last_input = {0, 0};
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            double elapsed = (now.tv_sec  - last_input.tv_sec)
+                           + (now.tv_nsec - last_input.tv_nsec) * 1e-9;
+            int hd = (elapsed < 0.5) ? 1 : 30;
             halfdelay(hd);
             ch = getch();
             cbreak();
-            if (ch != ERR) last_input = time(NULL);
+            if (ch != ERR) clock_gettime(CLOCK_MONOTONIC, &last_input);
         }
 
         if (ch == 'q' || ch == 'Q' || ch == 27) break;
@@ -1047,6 +1082,10 @@ int main(void) {
         else if ((ch == 'b' || ch == 'B') && mode == MODE_PAGE) {
             mode             = MODE_SEARCH;
             links_panel_open = 0;
+            /* Effacer les résidus chafa et forcer un redraw complet */
+            img_cache_clear();
+            clear();
+            refresh();
         }
 
         else if (ch == '\t' && mode == MODE_PAGE) {

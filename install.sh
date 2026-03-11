@@ -3,7 +3,7 @@
 set -e
 
 VUEKO_DIR="$(cd "$(dirname "$0")" && pwd)"
-BIN_DIR="$HOME/.local/bin"
+BIN_DIR="$HOME/bin"
 
 echo "╔══════════════════════════════════════════╗"
 echo "║         Installation de Vueko            ║"
@@ -131,7 +131,7 @@ mkdir -p "$VUEKO_DIR/datas/cache" \
          "$VUEKO_DIR/datas/videos"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 7. INSTALLATION DANS ~/.local/bin
+# 7. INSTALLATION DANS ~/bin
 #    base_dir dans browser.c = dossier du binaire via readlink
 #    → tous les fichiers nécessaires doivent être au même endroit
 # ─────────────────────────────────────────────────────────────────────────────
@@ -157,12 +157,12 @@ if [ ! -e "$BIN_DIR/datas" ]; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 8. AJOUTER ~/.local/bin AU PATH
+# 8. AJOUTER ~/bin AU PATH
 # ─────────────────────────────────────────────────────────────────────────────
 add_to_rc() {
     local RC="$1"
-    local LINE='export PATH="$HOME/.local/bin:$PATH"'
-    if [ -f "$RC" ] && ! grep -q '\.local/bin' "$RC" 2>/dev/null; then
+    local LINE='export PATH="$HOME/bin:$PATH"'
+    if [ -f "$RC" ] && ! grep -qE '(^|:)\$HOME/bin(:|"|$)' "$RC" 2>/dev/null; then
         printf '\n# Vueko\n%s\n' "$LINE" >> "$RC"
         echo "  → PATH ajouté à $RC"
     fi
@@ -173,8 +173,8 @@ case "$SHELL" in
     */fish)
         FISH_RC="$HOME/.config/fish/config.fish"
         mkdir -p "$(dirname "$FISH_RC")"
-        if ! grep -q '\.local/bin' "$FISH_RC" 2>/dev/null; then
-            echo 'fish_add_path $HOME/.local/bin' >> "$FISH_RC"
+        if ! grep -qE '\$HOME/bin' "$FISH_RC" 2>/dev/null; then
+            echo 'fish_add_path $HOME/bin' >> "$FISH_RC"
             echo "  → PATH ajouté à $FISH_RC"
         fi
         ;;
@@ -193,7 +193,7 @@ echo "  Binaire  : $BIN_DIR/vueko"
 echo "  Données  : $VUEKO_DIR/datas/"
 echo ""
 echo "  Ouvre un nouveau terminal ou tape :"
-echo "    export PATH=\"\$HOME/.local/bin:\$PATH\""
+echo "    export PATH=\"\$HOME/bin:\$PATH\""
 echo "  puis :"
 echo "    vueko"
 echo ""
