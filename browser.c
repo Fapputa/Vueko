@@ -619,9 +619,8 @@ static void draw_page(WINDOW *win) {
             attr = COLOR_PAIR(CP_HEADING) | A_BOLD;
             prefix_len = 5;
         } else if (strncmp(line, "##LK ", 5) == 0) {
-            int is_link_hl = (li == next_link_line);
-            attr = is_link_hl ? (COLOR_PAIR(CP_LINK_HL) | A_BOLD)
-                              : (COLOR_PAIR(CP_URL)     | A_UNDERLINE);
+            attr = (li == next_link_line) ? (COLOR_PAIR(CP_LINK_HL) | A_BOLD)
+                                          : (COLOR_PAIR(CP_URL)     | A_UNDERLINE);
             prefix_len = 5;
         } else if (strncmp(line, "##VD ", 5) == 0) {
             attr = COLOR_PAIR(CP_VIDEO) | A_BOLD;
@@ -634,6 +633,11 @@ static void draw_page(WINDOW *win) {
             si++;
             continue;
         }
+
+        /* Surligner n'importe quelle ligne qui correspond au lien sélectionné
+         * (les liens sont souvent dans du texte normal sans préfixe ##LK) */
+        if (li == next_link_line)
+            attr = COLOR_PAIR(CP_LINK_HL) | A_BOLD;
 
         wattron(win, attr);
         mvwprintw(win, si, 0, "%.*s", print_w, line + prefix_len);
@@ -1062,8 +1066,13 @@ int main(void) {
             if (query[0] == '\0') continue;
 
             char cmd[1024];
+            /* Écrire la query dans un fichier pour éviter tout problème
+             * d'échappement shell (espaces, apostrophes, guillemets...) */
+            {   FILE *_qf = fopen("/tmp/vueko_query.txt", "w");
+                if (_qf) { fputs(query, _qf); fclose(_qf); } }
             snprintf(cmd, sizeof(cmd),
-                     "python3 %s/search.py '%s' 2>>/tmp/vueko.log", base_dir, query);
+                     "python3 %s/search.py \"$(cat /tmp/vueko_query.txt)\" 2>>/tmp/vueko.log",
+                     base_dir);
             werase(content_win);
             wrefresh(content_win);
             char msg[512];

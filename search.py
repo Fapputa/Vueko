@@ -1,13 +1,17 @@
 import sys
 import os
 import json
-from urllib.parse import urlparse, unquote, parse_qs
+from urllib.parse import urlparse, unquote, parse_qs, quote_plus
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 import base64
 
-research = sys.argv[1:]
-research = "+".join(research)
-URL = "https://www.bing.com/search?pc=MOZI&form=MOZLBR&q=" + research
+# Joindre tous les arguments avec des espaces (gère "programmation c" passé en un ou plusieurs args)
+research = " ".join(sys.argv[1:]).strip()
+if not research:
+    sys.exit(1)
+
+# Encoder proprement pour l'URL Bing
+URL = "https://www.bing.com/search?pc=MOZI&form=MOZLBR&q=" + quote_plus(research)
 
 output_file = "datas/cache/search_results.json"
 os.makedirs(os.path.dirname(output_file), exist_ok=True)
@@ -16,16 +20,12 @@ def extract_real_url(bing_url: str) -> str:
     """Extrait l'URL réelle depuis une URL de redirection Bing."""
     if not bing_url:
         return bing_url
-    # Format: bing.com/ck/a?...&u=a1<base64url>...
     if "bing.com/ck/a" in bing_url:
         try:
-            # Extraire le paramètre u=
             parts = parse_qs(bing_url.split("?", 1)[-1])
             u = parts.get("u", [None])[0]
             if u and u.startswith("a1"):
-                # Décoder le base64url (sans les 2 premiers chars "a1")
                 b64 = u[2:]
-                # Ajouter padding si nécessaire
                 b64 += "=" * (4 - len(b64) % 4)
                 decoded = base64.urlsafe_b64decode(b64).decode("utf-8", errors="replace")
                 if decoded.startswith("http"):
@@ -62,7 +62,6 @@ with sync_playwright() as p:
         except:
             continue
 
-        # Décoder l'URL réelle depuis le base64 Bing (pas de requête réseau)
         final_url = extract_real_url(bing_url)
 
         try:
@@ -73,7 +72,6 @@ with sync_playwright() as p:
         if not site and final_url:
             site = urlparse(final_url).hostname
 
-        # Ignorer les URLs Bing de redirection non décodées
         if "bing.com/ck/a" in final_url:
             continue
         data.append({
