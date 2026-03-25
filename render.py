@@ -18,9 +18,11 @@ else:
 SAFE_MARGIN = 5
 term_width = max(term_width - SAFE_MARGIN, 40)
 
-HTML_FILE   = "datas/cache/temp.html"
-OUTPUT_FILE = "datas/cache/page.json"
-IMAGE_DIR   = "datas/images"
+_VUEKO_DIR = os.environ.get("VUEKO_DIR") or os.path.dirname(os.path.realpath(__file__))
+
+HTML_FILE   = os.path.join(_VUEKO_DIR, "datas", "cache", "temp.html")
+OUTPUT_FILE = os.path.join(_VUEKO_DIR, "datas", "cache", "page.json")
+IMAGE_DIR   = os.path.join(_VUEKO_DIR, "datas", "images")
 
 # Nombre de lignes vides ajoutées en bas pour éviter que le contenu
 # soit coupé par la status bar (padding de sécurité)
@@ -67,7 +69,7 @@ class Renderer:
         self._inline_buf   = []
         self._pending_links = []
         self.imgmap = {}
-        imgmap_path = "datas/cache/imgmap.json"
+        imgmap_path = os.path.join(_VUEKO_DIR, "datas", "cache", "imgmap.json")
         if os.path.exists(imgmap_path):
             try:
                 with open(imgmap_path, "r", encoding="utf-8") as f:
@@ -212,11 +214,11 @@ class Renderer:
             self._flush()
             self.blank()
             vfiles = sorted(
-                f for f in os.listdir("datas/videos")
+                f for f in os.listdir(os.path.join(_VUEKO_DIR, "datas", "videos"))
                 if f.endswith((".mp4", ".webm"))
-            ) if os.path.exists("datas/videos") else []
+            ) if os.path.exists(os.path.join(_VUEKO_DIR, "datas", "videos")) else []
             if vfiles:
-                vp = os.path.join("datas/videos", vfiles[0])
+                vp = os.path.join(_VUEKO_DIR, "datas", "videos", vfiles[0])
                 li = len(self.lines)
                 self.lines.append("##VD ▶  Vidéo — Entrée pour lire")
                 self.links.append({"text": "▶ Lire la vidéo",

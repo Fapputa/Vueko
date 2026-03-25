@@ -341,13 +341,26 @@ static void parse_im_line(const char *line,
 }
 
 static int calc_img_h(int orig_w, int orig_h, int term_w, int term_h) {
+    /* Les cellules terminales ont un ratio hauteur/largeur d'environ 2:1
+     * (une cellule est ~2x plus haute que large en pixels).
+     * Pour conserver les proportions :
+     *   term_h_lignes = (orig_h / orig_w) * effective_w * 0.5
+     * On évite d'upscaler une petite image sur toute la largeur du terminal. */
     if (orig_w > 0 && orig_h > 0) {
-        int h = (int)((double)orig_h / (double)orig_w * (double)term_w * 0.5);
-        if (h < 3)        h = 3;
-        if (h > term_h / 2) h = term_h / 2;
+        /* Ne pas étirer au-delà de la taille réelle de l'image.
+         * Hypothèse : ~8px par colonne terminale (police 8pt standard). */
+        int effective_w = term_w;
+        int orig_w_cols = orig_w / 8;
+        if (orig_w_cols > 0 && orig_w_cols < effective_w)
+            effective_w = orig_w_cols;
+
+        int h = (int)((double)orig_h / (double)orig_w * (double)effective_w * 0.5);
+        if (h < 2)               h = 2;
+        if (h > term_h * 2 / 3) h = term_h * 2 / 3;
         return h;
     }
-    int h = term_h / 4;
+    /* Pas de dimensions connues : hauteur par défaut */
+    int h = term_h / 5;
     if (h < 4) h = 4;
     return h;
 }
@@ -414,6 +427,16 @@ static void draw_images_overlay(WINDOW *win) {
             char imgpath[MAX_LEN];
             int orig_w, orig_h;
             parse_im_line(line, imgpath, MAX_LEN, &orig_w, &orig_h);
+
+            /* Largeur effective : ne pas upscaler une petite image
+             * au-delà de sa taille réelle (~8px par colonne terminale). */
+            int eff_w = img_w;
+            if (orig_w > 0) {
+                int orig_w_cols = orig_w / 8;
+                if (orig_w_cols > 0 && orig_w_cols < eff_w)
+                    eff_w = orig_w_cols;
+            }
+
             int img_h = calc_img_h(orig_w, orig_h, img_w, height);
             for (int _ri = 0; _ri < img_real_count; _ri++)
                 if (img_real_line[_ri] == li) { img_h = img_real_h[_ri]; break; }
@@ -426,7 +449,7 @@ static void draw_images_overlay(WINDOW *win) {
             char cmd[MAX_LEN * 2];
             snprintf(cmd, sizeof(cmd),
                      "chafa --size=%dx%d --colors=256 --animate=off '%s' 2>/dev/null",
-                     img_w, img_h, imgpath);
+                     eff_w, img_h, imgpath);
 
             FILE *p = popen(cmd, "r");
             if (!p) { si += img_h; continue; }
@@ -437,8 +460,9 @@ static void draw_images_overlay(WINDOW *win) {
                    && img_cache_count < IMG_CACHE_LINES) {
                 int len = strlen(row);
                 if (len > 0 && row[len - 1] == '\n') row[len - 1] = '\0';
+                /* Format : "y|eff_w|contenu_ansi" */
                 char entry[8200];
-                snprintf(entry, sizeof(entry), "%d|%s", term_y + r, row);
+                snprintf(entry, sizeof(entry), "%d|%d|%s", term_y + r, eff_w, row);
                 img_cache[img_cache_count++] = strdup(entry);
                 r++;
             }
@@ -455,20 +479,24 @@ static void draw_images_overlay(WINDOW *win) {
         }
     }
 
-    /* Écriture avec clipping strict :
-     * 1. Tronquer la ligne ANSI à img_w colonnes visibles
-     * 2. Positionner + écrire
-     * 3. \033[%d;%dH\033[K  efface depuis img_w+1 jusqu'à fin de ligne
-     *    → le fond de la page (rouge/brun) et la scrollbar ne saignent plus */
+    /* Écriture avec clipping strict.
+     * Format entrée cache : "y|eff_w|contenu_ansi"
+     * On clippe à eff_w (largeur réelle de l'image, ≤ img_w).
+     * On efface de eff_w+1 à fin de ligne pour ne pas laisser
+     * de résidus si une image précédente était plus large. */
     for (int i = 0; i < img_cache_count; i++) {
         char *e   = img_cache[i];
-        char *pip = strchr(e, '|');
-        if (!pip) continue;
+        char *p1  = strchr(e, '|');
+        if (!p1) continue;
         int y = atoi(e);
-        char *truncated = ansi_truncate(pip + 1, img_w);
+        char *p2 = strchr(p1 + 1, '|');
+        if (!p2) continue;
+        int ew = atoi(p1 + 1);
+        if (ew < 1) ew = img_w;
+        char *truncated = ansi_truncate(p2 + 1, ew);
         if (!truncated) continue;
         printf("\033[%d;1H%s\033[%d;%dH\033[K",
-               y, truncated, y, img_w + 1);
+               y, truncated, y, ew + 1);
         free(truncated);
     }
     if (img_cache_count > 0) fflush(stdout);
@@ -887,6 +915,7 @@ int main(void) {
             if (slash) { *slash = '\0'; strncpy(base_dir, exe, sizeof(base_dir)-1); }
         }
         if (base_dir[0] == '\0') getcwd(base_dir, sizeof(base_dir));
+        setenv("VUEKO_DIR", base_dir, 1);
         chdir(base_dir);
         FILE *dbg = fopen("/tmp/vueko.log", "w");
         if (dbg) { fprintf(dbg, "base_dir: %s\n", base_dir); fclose(dbg); }

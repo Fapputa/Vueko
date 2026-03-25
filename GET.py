@@ -19,12 +19,15 @@ URL = sys.argv[1]
 BLOCKED_ADS   = ["doubleclick.net","google-analytics.com","googlesyndication.com",
                   "adnxs.com","amazon-adsystem.com","scorecardresearch.com"]
 BLOCKED_TYPES = {"font"}  # scripts autorisés pour lazy loading
-IMAGE_DIR = "datas/images"
-VIDEO_DIR = "datas/videos"
+
+_VUEKO_DIR = os.environ.get("VUEKO_DIR") or os.path.dirname(os.path.realpath(__file__))
+IMAGE_DIR = os.path.join(_VUEKO_DIR, "datas", "images")
+VIDEO_DIR = os.path.join(_VUEKO_DIR, "datas", "videos")
+_CACHE_DIR = os.path.join(_VUEKO_DIR, "datas", "cache")
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
-os.makedirs("datas/cache", exist_ok=True)
+os.makedirs(_CACHE_DIR, exist_ok=True)
 
 # ── Détection par magic bytes (sans filetype) ────────────────────────────────
 MAGIC = [
@@ -109,11 +112,11 @@ with sync_playwright() as p:
                 }
             });
         }""")
-        with open("datas/cache/temp.html","w",encoding="utf-8") as f:
+        with open(os.path.join(_CACHE_DIR, "temp.html"),"w",encoding="utf-8") as f:
             f.write(page.content())
     except Exception as e:
         try:
-            with open("datas/cache/temp.html","w",encoding="utf-8") as f:
+            with open(os.path.join(_CACHE_DIR, "temp.html"),"w",encoding="utf-8") as f:
                 f.write(page.content())
         except: pass
 
@@ -232,7 +235,7 @@ for t in threads: t.start()
 for t in threads: t.join(timeout=12)
 print(f"[GET] {nimg[0]} images téléchargées")
 import json as _j
-with open("datas/cache/imgmap.json","w") as f: _j.dump(imgmap,f)
+with open(os.path.join(_CACHE_DIR, "imgmap.json"),"w") as f: _j.dump(imgmap,f)
 
 # ── Phase 3 : vidéos ─────────────────────────────────────────────────────────
 if os.path.exists(VIDEO_DIR): shutil.rmtree(VIDEO_DIR)
@@ -254,6 +257,6 @@ for url in video_urls[:3]:
     except: pass
 
 # ── Liens ─────────────────────────────────────────────────────────────────────
-with open("datas/cache/templink.csv","w",encoding="utf-8") as f:
+with open(os.path.join(_CACHE_DIR, "templink.csv"),"w",encoding="utf-8") as f:
     for l in link_urls: f.write(l+"\n")
 print("[GET] Terminé.")

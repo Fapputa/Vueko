@@ -3,7 +3,15 @@
 set -e
 
 VUEKO_DIR="$(cd "$(dirname "$0")" && pwd)"
-BIN_DIR="$HOME/bin"
+
+# Toujours utiliser le HOME du vrai utilisateur, même si lancé avec sudo
+if [ -n "$SUDO_USER" ]; then
+    REAL_HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+else
+    REAL_HOME="$HOME"
+fi
+
+BIN_DIR="$REAL_HOME/bin"
 
 echo "╔══════════════════════════════════════════╗"
 echo "║         Installation de Vueko            ║"
@@ -36,19 +44,28 @@ echo "==> Installation des dépendances système..."
 
 case "$PM" in
     pacman)
-        sudo pacman -S --needed --noconfirm \
+        # ffmpeg : ne pas installer si une variante est déjà présente
+        # (ffmpeg4.4 entre en conflit avec libvpx du ffmpeg standard)
+        FFMPEG_PKGS=""
+        if ! command -v ffmpeg &>/dev/null; then
+            FFMPEG_PKGS="ffmpeg"
+        else
+            echo "  → ffmpeg déjà disponible ($(command -v ffmpeg)), installation ignorée"
+        fi
+
+        pacman -S --needed --noconfirm \
             gcc make \
             ncurses \
             json-c \
             chafa \
-            ffmpeg \
+            $FFMPEG_PKGS \
             mpg123 \
             python \
             python-pip
         ;;
     apt)
-        sudo apt-get update -qq
-        sudo apt-get install -y \
+        apt-get update -qq
+        apt-get install -y \
             gcc make \
             libncurses-dev libncurses6 \
             libjson-c-dev libjson-c5 \
@@ -59,7 +76,7 @@ case "$PM" in
             python3-pip
         ;;
     dnf)
-        sudo dnf install -y \
+        dnf install -y \
             gcc make \
             ncurses-devel \
             json-c-devel \
@@ -70,7 +87,7 @@ case "$PM" in
             python3-pip
         ;;
     zypper)
-        sudo zypper install -y \
+        zypper install -y \
             gcc make \
             ncurses-devel \
             libjson-c-devel \
@@ -93,11 +110,17 @@ esac
 echo ""
 echo "==> Installation des dépendances Python..."
 
-PIP="pip"
-command -v pip  &>/dev/null || PIP="pip3"
-command -v pip3 &>/dev/null || PIP="python3 -m pip"
+# Toujours installer en tant que l'utilisateur réel, pas root,
+# pour que les packages et le cache Playwright soient dans son HOME
+RUN_AS_USER() {
+    if [ -n "$SUDO_USER" ]; then
+        sudo -u "$SUDO_USER" env HOME="$REAL_HOME" "$@"
+    else
+        "$@"
+    fi
+}
 
-$PIP install --break-system-packages \
+RUN_AS_USER python3 -m pip install --break-system-packages \
     playwright \
     requests \
     beautifulsoup4 \
@@ -108,7 +131,8 @@ $PIP install --break-system-packages \
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "==> Installation de Chromium via Playwright..."
-python3 -m playwright install chromium
+# Idem : le cache ms-playwright doit atterrir dans ~/.cache de l'utilisateur réel
+RUN_AS_USER python3 -m playwright install chromium
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 5. COMPILATION
@@ -156,6 +180,11 @@ if [ ! -e "$BIN_DIR/datas" ]; then
     echo "  → Lien symbolique : $BIN_DIR/datas → $VUEKO_DIR/datas"
 fi
 
+# Corriger la propriété du dossier ~/bin si on est en sudo
+if [ -n "$SUDO_USER" ]; then
+    chown -R "$SUDO_USER:$SUDO_USER" "$BIN_DIR"
+fi
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 8. AJOUTER ~/bin AU PATH
 # ─────────────────────────────────────────────────────────────────────────────
@@ -168,17 +197,18 @@ add_to_rc() {
     fi
 }
 
-case "$SHELL" in
-    */zsh)  add_to_rc "$HOME/.zshrc"  ;;
+USER_SHELL="$(getent passwd "$SUDO_USER" | cut -d: -f7)"
+case "$USER_SHELL" in
+    */zsh)  add_to_rc "$REAL_HOME/.zshrc"  ;;
     */fish)
-        FISH_RC="$HOME/.config/fish/config.fish"
+        FISH_RC="$REAL_HOME/.config/fish/config.fish"
         mkdir -p "$(dirname "$FISH_RC")"
         if ! grep -qE '\$HOME/bin' "$FISH_RC" 2>/dev/null; then
             echo 'fish_add_path $HOME/bin' >> "$FISH_RC"
             echo "  → PATH ajouté à $FISH_RC"
         fi
         ;;
-    *)      add_to_rc "$HOME/.bashrc" ;;
+    *)      add_to_rc "$REAL_HOME/.bashrc" ;;
 esac
 
 # ─────────────────────────────────────────────────────────────────────────────

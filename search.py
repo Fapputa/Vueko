@@ -13,7 +13,8 @@ if not research:
 # Encoder proprement pour l'URL Bing
 URL = "https://www.bing.com/search?pc=MOZI&form=MOZLBR&q=" + quote_plus(research)
 
-output_file = "datas/cache/search_results.json"
+VUEKO_DIR = os.environ.get("VUEKO_DIR") or os.path.dirname(os.path.realpath(__file__))
+output_file = os.path.join(VUEKO_DIR, "datas", "cache", "search_results.json")
 os.makedirs(os.path.dirname(output_file), exist_ok=True)
 
 def extract_real_url(bing_url: str) -> str:
